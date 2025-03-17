@@ -30,11 +30,19 @@ from peewee import (
     Field, Model, Metadata
 )
 from playhouse.pool import PooledMySQLDatabase, PooledPostgresqlDatabase
+from api.db.oracle_ext import OracleDatabase
+from api.db.oracle_ext import PooledOracleDatabase
+from api.db.oracle_ext import OracleMigrator
+
+import oracledb as oracle
 
 from api.db import SerializedType, ParserType
 from api import settings
 from api import utils
+import logging
 
+logger = logging.getLogger('db_model')
+logger.setLevel(logging.DEBUG)
 
 def singleton(cls, *args, **kw):
     instances = {}
@@ -61,6 +69,7 @@ AUTO_DATE_TIMESTAMP_FIELD_PREFIX = {
 class TextFieldType(Enum):
     MYSQL = 'LONGTEXT'
     POSTGRES = 'TEXT'
+    ORACLE = 'CLOB'
 
 
 class LongTextField(TextField):
@@ -83,6 +92,12 @@ class JSONField(LongTextField):
     def python_value(self, value):
         if not value:
             return self.default_value
+        # 将 CLOB 类型数据转换为字符串
+        field_type = TextFieldType[settings.DATABASE_TYPE.upper()].value
+        if field_type == "CLOB":
+            value = value.read()
+            #logger.debug(f"Converted CLOB to string: {value}")
+
         return utils.json_loads(
             value, object_hook=self._object_hook, object_pairs_hook=self._object_pairs_hook)
 
@@ -275,11 +290,13 @@ class JsonSerializedField(SerializedField):
 class PooledDatabase(Enum):
     MYSQL = PooledMySQLDatabase
     POSTGRES = PooledPostgresqlDatabase
+    ORACLE = PooledOracleDatabase
 
 
 class DatabaseMigrator(Enum):
     MYSQL = MySQLMigrator
     POSTGRES = PostgresqlMigrator
+    ORACLE = OracleMigrator
 
 
 @singleton
@@ -288,6 +305,7 @@ class BaseDataBase:
         database_config = settings.DATABASE.copy()
         db_name = database_config.pop("name")
         self.database_connection = PooledDatabase[settings.DATABASE_TYPE.upper()].value(db_name, **database_config)
+        logging.info('database config: %s', database_config)
         logging.info('init database on cluster mode successfully')
 
 
@@ -384,9 +402,62 @@ class MysqlDatabaseLock:
         return magic
 
 
+class OracleDatabaseLock:
+    def __init__(self, lock_name, timeout=10, db=None):
+        self.lock_name = lock_name
+        self.timeout = int(timeout)
+        self.db = db if db else DB
+
+    def lock(self):
+        # 在 Oracle 中，使用 DBMS_LOCK.REQUEST 函数来获取锁
+        cursor = self.db.execute_sql(
+            "SELECT DBMS_LOCK.REQUEST(id => DBMS_LOCK.ALLOCATE_UNIQUE(:lock_name, :lock_name), "
+            "timeout => :timeout, release_on_commit => FALSE) FROM DUAL",
+            {'lock_name': self.lock_name, 'timeout': self.timeout}
+        )
+        ret = cursor.fetchone()
+        if ret[0] == 0:  # 成功获取锁
+            return True
+        elif ret[0] == 1:  # 获取锁超时
+            raise Exception(f'acquire oracle lock {self.lock_name} timeout')
+        else:  # 获取锁失败
+            raise Exception(f'failed to acquire lock {self.lock_name}')
+
+    def unlock(self):
+        # 在 Oracle 中，使用 DBMS_LOCK.RELEASE 函数来释放锁
+        cursor = self.db.execute_sql(
+            "SELECT DBMS_LOCK.RELEASE(id => DBMS_LOCK.ALLOCATE_UNIQUE(:lock_name, :lock_name)) FROM DUAL",
+            {'lock_name': self.lock_name}
+        )
+        ret = cursor.fetchone()
+        if ret[0] == 0:  # 成功释放锁
+            return True
+        elif ret[0] == 3:  # 锁不存在
+            raise Exception(f'oracle lock {self.lock_name} does not exist')
+        else:  # 释放锁失败
+            raise Exception(f'failed to release lock {self.lock_name}')
+
+    #def __enter__(self):
+    #    if isinstance(self.db, Database):
+    #        self.lock()
+    #    return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if isinstance(self.db, Database):
+            self.unlock()
+
+    def __call__(self, func):
+        @wraps(func)
+        def magic(*args, **kwargs):
+            with self:
+                return func(*args, **kwargs)
+
+        return magic
+
 class DatabaseLock(Enum):
     MYSQL = MysqlDatabaseLock
     POSTGRES = PostgresDatabaseLock
+    ORACLE = OracleDatabaseLock
 
 
 DB = BaseDataBase().database_connection
@@ -510,7 +581,7 @@ class Tenant(DataBaseModel):
         index=True)
     rerank_id = CharField(
         max_length=128,
-        null=False,
+        null=True,
         help_text="default rerank model ID",
         index=True)
     tts_id = CharField(
@@ -812,7 +883,7 @@ class File(DataBaseModel):
     type = CharField(max_length=32, null=False, help_text="file extension", index=True)
     source_type = CharField(
         max_length=128,
-        null=False,
+        null=True,
         default="",
         help_text="where dose this document come from", index=True)
 
@@ -936,7 +1007,7 @@ class Conversation(DataBaseModel):
 class APIToken(DataBaseModel):
     tenant_id = CharField(max_length=32, null=False, index=True)
     token = CharField(max_length=255, null=False, index=True)
-    dialog_id = CharField(max_length=32, null=True, index=True)
+    dialog_id = CharField(max_length=32, null=False, index=True)
     source = CharField(max_length=16, null=True, help_text="none|agent|dialog", index=True)
     beta = CharField(max_length=255, null=True, index=True)
 

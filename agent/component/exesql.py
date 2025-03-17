@@ -20,6 +20,7 @@ from copy import deepcopy
 import pandas as pd
 import pymysql
 import psycopg2
+import oracledb
 from agent.component import GenerateParam, Generate
 import pyodbc
 import logging
@@ -43,7 +44,7 @@ class ExeSQLParam(GenerateParam):
 
     def check(self):
         super().check()
-        self.check_valid_value(self.db_type, "Choose DB type", ['mysql', 'postgresql', 'mariadb', 'mssql'])
+        self.check_valid_value(self.db_type, "Choose DB type", ['oracle', 'mysql', 'postgresql', 'mariadb', 'mssql'])
         self.check_empty(self.database, "Database name")
         self.check_empty(self.username, "database username")
         self.check_empty(self.host, "IP Address")
@@ -79,12 +80,20 @@ class ExeSQL(Generate, ABC):
         ans = self.get_input()
         ans = "".join([str(a) for a in ans["content"]]) if "content" in ans else ""
         ans = self._refactor(ans)
+        logging.info(f"db_type: {self._param.db_type}")
         if self._param.db_type in ["mysql", "mariadb"]:
             db = pymysql.connect(db=self._param.database, user=self._param.username, host=self._param.host,
                                  port=self._param.port, password=self._param.password)
         elif self._param.db_type == 'postgresql':
             db = psycopg2.connect(dbname=self._param.database, user=self._param.username, host=self._param.host,
                                   port=self._param.port, password=self._param.password)
+        elif self._param.db_type == 'oracle':
+            dsn = oracledb.makedsn(self._param.host, self._param.port, service_name=self._param.database)
+            db = oracledb.connect(
+                user=self._param.username,
+                password=self._param.password,
+                dsn=dsn
+            )
         elif self._param.db_type == 'mssql':
             conn_str = (
                     r'DRIVER={ODBC Driver 17 for SQL Server};'
@@ -101,7 +110,8 @@ class ExeSQL(Generate, ABC):
         if not hasattr(self, "_loop"):
             setattr(self, "_loop", 0)
             self._loop += 1
-        input_list = re.split(r';', ans.replace(r"\n", " "))
+        input_list=re.split(r';', ans.replace(r"\n", " "))
+        logging.debug(f"input_list: {input_list}")
         sql_res = []
         for i in range(len(input_list)):
             single_sql = input_list[i]
@@ -110,13 +120,22 @@ class ExeSQL(Generate, ABC):
                 if not single_sql:
                     break
                 try:
+                    logging.info(f"single_sql: {single_sql}")
                     cursor.execute(single_sql)
-                    if cursor.rowcount == 0:
-                        sql_res.append({"content": "No record in the database!"})
-                        break
-                    if self._param.db_type == 'mssql':
-                        single_res = pd.DataFrame.from_records(cursor.fetchmany(self._param.top_n),
-                                                               columns=[desc[0] for desc in cursor.description])
+                    if self._param.db_type == 'oracle':
+                       # 尝试获取一行数据来判断是否有结果
+                       first_row = cursor.fetchone()
+                       if first_row is None:
+                          sql_res.append({"content": "No record in the database!"})
+                          break
+                       # 将第一行数据放回游标
+                       cursor.execute(single_sql)
+                       single_res  = pd.DataFrame.from_records(cursor.fetchmany(self._param.top_n),columns = [desc[0] for desc in cursor.description])
+                    elif cursor.rowcount == 0:
+                         sql_res.append({"content": "No record in the database!"})
+                         break
+                    elif self._param.db_type == 'mssql':
+                        single_res  = pd.DataFrame.from_records(cursor.fetchmany(self._param.top_n),columns = [desc[0] for desc in cursor.description])
                     else:
                         single_res = pd.DataFrame([i for i in cursor.fetchmany(self._param.top_n)])
                         single_res.columns = [i[0] for i in cursor.description]

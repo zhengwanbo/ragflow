@@ -19,6 +19,7 @@ from enum import IntEnum, Enum
 import json
 import rag.utils.es_conn
 import rag.utils.infinity_conn
+import rag.utils.oracle_conn
 
 import rag.utils
 from rag.nlp import search
@@ -44,7 +45,7 @@ HOST_PORT = None
 SECRET_KEY = None
 FACTORY_LLM_INFOS = None
 
-DATABASE_TYPE = os.getenv("DB_TYPE", 'mysql')
+DATABASE_TYPE = os.getenv("DB_TYPE", 'oracle')
 DATABASE = decrypt_database_config(name=DATABASE_TYPE)
 
 # authentication
@@ -66,7 +67,7 @@ kg_retrievaler = None
 def init_settings():
     global LLM, LLM_FACTORY, LLM_BASE_URL, LIGHTEN, DATABASE_TYPE, DATABASE, FACTORY_LLM_INFOS
     LIGHTEN = int(os.environ.get('LIGHTEN', "0"))
-    DATABASE_TYPE = os.getenv("DB_TYPE", 'mysql')
+    DATABASE_TYPE = os.getenv("DB_TYPE", 'oracle')
     DATABASE = decrypt_database_config(name=DATABASE_TYPE)
     LLM = get_base_config("user_default_llm", {})
     LLM_DEFAULT_MODELS = LLM.get("default_models", {})
@@ -124,10 +125,12 @@ def init_settings():
     FEISHU_OAUTH = get_base_config("oauth", {}).get("feishu")
 
     global DOC_ENGINE, docStoreConn, retrievaler, kg_retrievaler
-    DOC_ENGINE = os.environ.get('DOC_ENGINE', "elasticsearch")
+    DOC_ENGINE = os.environ.get('DOC_ENGINE', "oracle")
     lower_case_doc_engine = DOC_ENGINE.lower()
     if lower_case_doc_engine == "elasticsearch":
         docStoreConn = rag.utils.es_conn.ESConnection()
+    elif lower_case_doc_engine == "oracle":
+        docStoreConn = rag.utils.oracle_conn.OracleConnection()
     elif lower_case_doc_engine == "infinity":
         docStoreConn = rag.utils.infinity_conn.InfinityConnection()
     else:
